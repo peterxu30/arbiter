@@ -1,0 +1,5 @@
+svc_base_uri: scratch.ns/services
+metadata:
+  s.arbiter:
+    SourceName: "Arbiter"
+    Device: Thermostat
