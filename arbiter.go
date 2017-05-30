@@ -5,12 +5,13 @@ import (
 	"github.com/immesys/spawnpoint/spawnable"
 	bw2 "gopkg.in/immesys/bw2bind.v5"
 	"sync"
-	// "reflect"
-	// "time"
+	"reflect"
+	"time"
 )
 
 const (
 	PONUM = "2.1.1.0"
+	DELAY = 60
 )
 
 func NewPO(msg map[string]interface{}) (bw2.PayloadObject) { //Will this work for both thermostats and schedulers?
@@ -36,6 +37,7 @@ type TstatElem struct {
 	SlotUri string
 	SubscribeHandle string
 	LastSentSchedule map[string]interface{}
+	LastSentScheduleLock *sync.Mutex
 }
 
 func newSchedulerElem(signalUri string, slotUri string, priority int) *SchedulerElem {
@@ -64,6 +66,7 @@ func newTstatElem(signalUri string, slotUri string) *TstatElem {
 		SlotUri: slotUri,
 		SubscribeHandle: "",
 		LastSentSchedule: nil,
+		LastSentScheduleLock: &sync.Mutex{},
 	}
 }
 
@@ -74,10 +77,8 @@ type ZoneController struct {
 	schedulers []*SchedulerElem
 	tstat *TstatElem
 	schedulersLock *sync.Mutex
-	// tstatsLock *sync.Mutex
 	scheduleChan chan map[string]interface{}
 	tstatDataChan chan map[string]interface{}
-	lastSentSchedule map[string]interface{}
 	containingZC *ZoneController
 }
 
@@ -96,7 +97,6 @@ func newZoneController(bwClient *bw2.BW2Client, iface *bw2.Interface, schedulers
 		schedulersLock: &sync.Mutex{},
 		scheduleChan: make(chan map[string]interface{}, 5),
 		tstatDataChan: make(chan map[string]interface{}, 5),
-		lastSentSchedule: nil,
 		containingZC: containingZC,
 	}
 }
@@ -139,33 +139,22 @@ func (zc *ZoneController) updateScheduler(signalUri string, slotUri string, prio
 	zc.addScheduler(signalUri, slotUri, priority)
 }
 
-// func (zc *ZoneController) updateSchedulerElem(elem *SchedulerElem) {
-// 	zc.removeScheduler(elem.signalUri, elem.SlotUri)
-// 	zc.addScheduler(elem.signalUri, elem.SlotUri, elem.Priority)
-// }
-
 func (zc *ZoneController) setTstat(signalUri string, slotUri string) {
-	// zc.tstatsLock.Lock()
 	elem := newTstatElem(signalUri, slotUri)
 	zc.setTstatElem(elem)
-	// zc.tstatsLock.Unlock()
 }
 
 func (zc *ZoneController) setTstatElem(elem *TstatElem) {
-	zc.tstats = elem
-	zc.subscribeToTstat(elem)
+	zc.tstat = elem
+	zc.subscribeToThermostat()
 }
 
 func (zc *ZoneController) removeTstat(signalUri string, slotUri string) {
-	// zc.tstatsLock.Lock()
-	// for i, tstat := range zc.tstats {
 	if zc.tstat.SignalUri == signalUri && zc.tstat.SlotUri == slotUri {
 		zc.bwClient.Unsubscribe(zc.tstat.SubscribeHandle)
 		zc.tstat = nil
 		return
 	}
-	// }
-	// zc.tstatsLock.Unlock()
 }
 
 func (zc *ZoneController) removeTstatElem(elem *TstatElem) {
@@ -174,8 +163,8 @@ func (zc *ZoneController) removeTstatElem(elem *TstatElem) {
 
 func (zc *ZoneController) run() {
 	zc.subscribeToAllSchedulers()
-	zc.subscribeToTstat()
-	zc.publishToThermostats()
+	zc.subscribeToThermostat()
+	zc.publishToThermostat()
 	zc.publishToSchedulers()
 	c := make(chan bool)
 	<- c
@@ -234,7 +223,7 @@ func (zc *ZoneController) subscribeToScheduler(scheduler *SchedulerElem) {
 }
 
 // Logic that determines if a schedule is valid goes in here. (e.g. Max/min cooling setpoint, max/min heating setpoint, )
-func (zc *ZoneController) isValidSchedule(scheduler *SchedulerElem, schedule map[string]interface) bool {
+func (zc *ZoneController) isValidSchedule(scheduler *SchedulerElem, schedule map[string]interface{}) bool {
 	return zc.maxPriority == scheduler.Priority && !reflect.DeepEqual(scheduler.LastReceivedSchedule, schedule)
 }
 
@@ -245,8 +234,8 @@ func (zc *ZoneController) subscribeToThermostat() {
 		panic(err)
 	}
 
-	tstat.SubscribeHandle = handle
-	fmt.Println("Subscribing to tstat", tstat.SignalUri)
+	zc.tstat.SubscribeHandle = handle
+	fmt.Println("Subscribing to tstat", zc.tstat.SignalUri)
 	
 	go func() {
 		for msg := range subscribeTstatChan {
@@ -270,30 +259,41 @@ func (zc *ZoneController) subscribeToThermostat() {
 				return
 			}
 
-			if !(tstatData['override'] == true || (tstatData['heating_setpoint'] == tstat.LastSentSchedule['heating_setpoint'] &&
-				tstatData['cooling_setpoint'] == tstat.LastSentSchedule['cooling_setpoint'] &&
-				tstatData['mode'] == tstat.LastSentSchedule['mode'])) {
-				//last sent schedule was not delivered.
-				//TODO: Message Deliverance Ensurance
+			zc.tstat.LastSentScheduleLock.Lock()
+			if (tstatData["time"].(int64) + DELAY < time.Now().UnixNano()) ||
+				(tstatData["override"] == true || (tstatData["heating_setpoint"] == zc.tstat.LastSentSchedule["heating_setpoint"] &&
+				tstatData["cooling_setpoint"] == zc.tstat.LastSentSchedule["cooling_setpoint"] &&
+				tstatData["mode"] == zc.tstat.LastSentSchedule["mode"])) {
+				//last sent schedule was delivered.
+				fmt.Println(tstatData)
+				zc.tstatDataChan <- tstatData
+			} else {
+				fmt.Println("msg not delivered")
+				zc.scheduleChan <- zc.tstat.LastSentSchedule
 			}
-
-			fmt.Println(tstatData)
-			zc.tstatDataChan <- tstatData
+			zc.tstat.LastSentScheduleLock.Unlock()
 		}
 	}()
 }
 
-func (zc *ZoneController) publishToThermostats() {
+func (zc *ZoneController) publishToThermostat() {
 	go func() {
 		for schedule := range zc.scheduleChan {
+			zc.tstat.LastSentScheduleLock.Lock()
+			if schedule["time"].(int64) < zc.tstat.LastSentSchedule["time"].(int64) {
+				continue
+			}
+			zc.tstat.LastSentScheduleLock.Unlock()
+
 			schedulePO := NewPO(schedule)
 			zc.schedulersLock.Lock()
-			// for _, tstat := range zc.tstats {
 			zc.publishPO(zc.tstat.SlotUri, schedulePO)
-			fmt.Println("Published schedule", schedule, tstat.SlotUri)
-				// zc.iface.PublishSignal(tstat.SlotUri, schedulePO)
-			// }
-			zc.lastSentSchedule = schedule
+			fmt.Println("Published schedule", schedule, zc.tstat.SlotUri)
+
+			zc.tstat.LastSentScheduleLock.Lock()
+			zc.tstat.LastSentSchedule = schedule
+			zc.tstat.LastSentScheduleLock.Unlock()
+
 			zc.schedulersLock.Unlock()
 		}
 	}()
@@ -308,7 +308,6 @@ func (zc *ZoneController) publishToSchedulers() {
 			for _, scheduler := range zc.schedulers {
 				zc.publishPO(scheduler.SlotUri, tstatDataPO)
 				fmt.Println("Published thermostat data", tstatData, scheduler.SlotUri)
-				// zc.iface.PublishSignal(scheduler.SlotUri, tstatDataPO)
 			}
 			zc.schedulersLock.Unlock()
 		}
