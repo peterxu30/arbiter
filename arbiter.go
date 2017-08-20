@@ -11,6 +11,7 @@ import (
 )
 
 const (
+	ARBITER_PONUM = "2.1.1.1"
 )
 
 type Arbiter struct {
@@ -19,7 +20,7 @@ type Arbiter struct {
 	zcMap map[uuid.UUID]*ZoneController
 }
 
-func newArbiter(bwClient *bw2.BW2Client, baseuri string) *Arbiter {
+func NewArbiter(bwClient *bw2.BW2Client, baseuri string) *Arbiter {
 	return &Arbiter {
 		bwClient: bwClient,
 		baseuri: baseuri,
@@ -27,18 +28,18 @@ func newArbiter(bwClient *bw2.BW2Client, baseuri string) *Arbiter {
 	}
 }
 
-func (a *Arbiter) addZoneController(zc *ZoneController) {
+func (a *Arbiter) AddZoneController(zc *ZoneController) {
 	a.zcMap[zc.id] = zc
 }
 
-func (a *Arbiter) removeZoneController(zc *ZoneController) {
+func (a *Arbiter) RemoveZoneController(zc *ZoneController) {
 	delete(a.zcMap, zc.id)
 }
 
-func (a *Arbiter) run() {
+func (a *Arbiter) Run() {
 	for _, zc := range a.zcMap {
 		go func() {
-			zc.run()
+			zc.Run()
 		}()
 	}
 	fmt.Println("All zone controllers running...")
@@ -52,7 +53,7 @@ func (a *Arbiter) subscribeUpdatesSlot() {
 	iface := service.RegisterInterface("vthermostat", "i.xbos.thermostat")
 
 	iface.SubscribeSlot("updates", func(msg *bw2.SimpleMessage) {
-		po := msg.GetOnePODF(PONUM) // TODO: need new PONUM
+		po := msg.GetOnePODF(ARBITER_PONUM)
 		if po == nil {
 			fmt.Println("Received actuation command without valid PO, dropping")
 			return
@@ -72,6 +73,7 @@ func (a *Arbiter) subscribeUpdatesSlot() {
 		}
 
 		//TODO: arbiter actuation
+		// { signal: x, slot: y, zone: z }
 	})
 }
 
@@ -89,23 +91,23 @@ func main() {
 
 	params.MergeMetadata(bwClient)
 
-	sched1 := newSchedulerElem("scratch.ns/services/s.schedule/schedule/i.xbos.thermostat/signal/info",
+	sched1 := NewSchedulerElem("scratch.ns/services/s.schedule/schedule/i.xbos.thermostat/signal/info",
 		"scratch.ns/services/s.schedule/schedule/i.xbos.thermostat/slot/state",
 		1)
 
 	//inferior scheduler
-	sched2 := newSchedulerElem("scratch.ns/services/s.schedule/schedule2/i.xbos.thermostat/signal/info",
+	sched2 := NewSchedulerElem("scratch.ns/services/s.schedule/schedule2/i.xbos.thermostat/signal/info",
 		"scratch.ns/services/s.schedule/schedule2/i.xbos.thermostat/slot/state",
 		0)
 
 	schedulers := []*SchedulerElem{sched1, sched2}
 
-	tstat := newTstatElem("scratch.ns/services/s.vthermostat/vthermostat/i.xbos.thermostat/signal/info",
+	tstat := NewTstatElem("scratch.ns/services/s.vthermostat/vthermostat/i.xbos.thermostat/signal/info",
 		"scratch.ns/services/s.vthermostat/vthermostat/i.xbos.thermostat/slot/state")
 
-	zc := newZoneController(bwClient, iface, schedulers, tstat, nil)
+	zc := NewZoneController(bwClient, iface, schedulers, tstat, nil)
 	
-	a := newArbiter(bwClient, baseuri)
-	a.addZoneController(zc)
-	a.run()
+	a := NewArbiter(bwClient, baseuri)
+	a.AddZoneController(zc)
+	a.Run()
 }
