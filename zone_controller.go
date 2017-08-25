@@ -24,6 +24,12 @@ func NewPO(msg map[string]interface{}, ponum string) (bw2.PayloadObject, error) 
 	return po, nil
 }
 
+type BWElem interface {
+	GetSignalUri() string
+	SetSignalUri(signalUri string)
+	GetSlotUri() string
+	SetSlotUri(slotUri string)
+}
 
 // SchedulerElem contains the necessary information to publish and subscribe to a scheduler.
 type SchedulerElem struct {
@@ -34,6 +40,22 @@ type SchedulerElem struct {
 	LastReceivedSchedule map[string]interface{}
 }
 
+func (scheduler *SchedulerElem) GetSignalUri() string {
+	return scheduler.SignalUri
+}
+
+func (scheduler *SchedulerElem) SetSignalUri(signalUri string) {
+	scheduler.SignalUri = signalUri
+}
+
+func (scheduler *SchedulerElem) GetSlotUri() string {
+	return scheduler.SlotUri
+}
+
+func (scheduler *SchedulerElem) SetSlotUri(slotUri string) {
+	scheduler.SlotUri = slotUri
+}
+
 // TstatElem contains the necessary information to publish and subscribe to a thermostat.
 type TstatElem struct {
 	SignalUri string
@@ -41,6 +63,22 @@ type TstatElem struct {
 	SubscribeHandle string
 	LastSentSchedule map[string]interface{}
 	LastSentScheduleLock *sync.Mutex
+}
+
+func (tstat *TstatElem) GetSignalUri() string {
+	return tstat.SignalUri
+}
+
+func (tstat *TstatElem) SetSignalUri(signalUri string) {
+	tstat.SignalUri = signalUri
+}
+
+func (tstat *TstatElem) GetSlotUri() string {
+	return tstat.SlotUri
+}
+
+func (tstat *TstatElem) SetSlotUri(slotUri string) {
+	tstat.SlotUri = slotUri
 }
 
 // NewSchedulerElem creates a new SchedulerElem with the given signalUri, slotUri, and priority.
@@ -71,9 +109,8 @@ type ZoneController struct {
 	bwClient *bw2.BW2Client
 	iface *bw2.Interface
 	maxPriority int
-	schedulers []*SchedulerElem
-	tstat *TstatElem
-	schedulersLock *sync.Mutex
+	schedulers sync.Map
+	tstats sync.Map
 	scheduleChan chan map[string]interface{}
 	tstatDataChan chan map[string]interface{}
 	containingZC *ZoneController
@@ -84,51 +121,65 @@ type ZoneController struct {
 func NewZoneController(bwClient *bw2.BW2Client,
 					   iface *bw2.Interface,
 					   schedulers []*SchedulerElem, 
-					   tstat *TstatElem, 
+					   tstats []*TstatElem, 
 					   containingZC *ZoneController) *ZoneController {
 	maxPriority := 0
 	if len(schedulers) > 0 {
 		maxPriority = schedulers[0].Priority
 	}
+
+	var schedulerMap sync.Map
+	var tstatMap sync.Map
+
+	for _, scheduler := range schedulers {
+		schedulerId := generateBWElemUUID(scheduler)
+		schedulerMap.Store(schedulerId, scheduler)
+	}
+
+	for _, tstat := range tstats {
+		tstatId := generateBWElemUUID(tstat)
+		tstatMap.Store(tstatId, tstat)
+	}
 	
 	return &ZoneController {
-		id: generateUUID(tstat.SignalUri),
+		id: generateRandomUUID(),
 		bwClient: bwClient,
 		iface: iface,
 		maxPriority: maxPriority,
-		schedulers: schedulers,
-		tstat: tstat,
-		schedulersLock: &sync.Mutex{},
+		schedulers: schedulerMap,
+		tstats: tstatMap,
 		scheduleChan: make(chan map[string]interface{}, 5),
 		tstatDataChan: make(chan map[string]interface{}, 5),
 		containingZC: containingZC,
 	}
 }
 
-func generateUUID(tstatSignalUri string) uuid.UUID {
-	return uuid.NewV5(uuid.FromStringOrNil(tstatSignalUri), tstatSignalUri)
+func generateBWElemUUID(elem BWElem) uuid.UUID {
+	return generateUUID(elem.GetSignalUri(), elem.GetSlotUri())
+}
+
+func generateUUID(ns string, name string) uuid.UUID {
+	return uuid.NewV5(uuid.FromStringOrNil(ns), name)
+}
+
+func generateRandomUUID() uuid.UUID {
+	return uuid.NewV4()
 }
 
 // AddScheduler creates and adds a new SchedulerElem with the given 
 // signalUri, slotUri, and priority to the ZoneController, sorted by priority.
+// If a scheduler exists with the given signalUri and slotUri, it will be replaced.
 // AddScheduler is a wrapper around AddSchedulerElem.
-func (zc *ZoneController) AddScheduler(signalUri string, slotUri string, priority int) {
+func (zc *ZoneController) AddOrUpdateScheduler(signalUri string, slotUri string, priority int) {
 	elem := NewSchedulerElem(signalUri, slotUri, priority)
-	zc.AddSchedulerElem(elem)
+	zc.AddOrUpdateSchedulerElem(elem)
 }
 
 // AddSchedulerElem adds the SchedulerElem to the ZoneController, sorted by priority.
-func (zc *ZoneController) AddSchedulerElem(elem *SchedulerElem) {
-	zc.schedulersLock.Lock()
-	defer zc.schedulersLock.Unlock()
-
-	for i, scheduler := range zc.schedulers {
-		if scheduler.Priority < elem.Priority {
-			zc.schedulers = append(append(zc.schedulers[:i], elem), zc.schedulers[i:]...)
-			zc.SubscribeToScheduler(elem)
-			return
-		}
-	}
+// If a scheduler exists with the given signalUri and slotUri, it will be replaced.
+func (zc *ZoneController) AddOrUpdateSchedulerElem(elem *SchedulerElem) {
+	schedulerId := generateBWElemUUID(elem)
+	zc.schedulers.Store(schedulerId, elem)
 }
 
 // RemoveScheduler removes a SchedulerElem from the ZoneController that matches the given signalUri and slotUri.
@@ -141,82 +192,71 @@ func (zc *ZoneController) RemoveScheduler(signalUri string, slotUri string) {
 // RemoveSchedulerElem removes a SchedulerElem from the ZoneController
 // that matches the given elem's signalUri and slotUri.
 func (zc *ZoneController) RemoveSchedulerElem(elem *SchedulerElem) {
-	zc.schedulersLock.Lock()
-	defer zc.schedulersLock.Unlock()
-
-	for i, scheduler := range zc.schedulers {
-		if scheduler.SignalUri == elem.SignalUri && scheduler.SlotUri == elem.SlotUri {
-			zc.schedulers = append(zc.schedulers[:i], zc.schedulers[i+1:]...)
-			zc.bwClient.Unsubscribe(scheduler.SubscribeHandle)
-			return
-		}
-	}
-}
-
-// UpdateScheduler updates a SchedulerElem's priority. The SchedulerElem's SignalUri and SlotUri must match the given arguments.
-// UpdateScheduler is a wrapper around UpdateSchedulerElem.
-func (zc *ZoneController) UpdateScheduler(signalUri string, slotUri string, priority int) {
-	elem := NewSchedulerElem(signalUri, slotUri, priority)
-	zc.UpdateSchedulerElem(elem)
-}
-
-// UpdateSchedulerElem updates a SchedulerElem's priority. The SchedulerElem's SignalUri and SlotUri must match the given elem's.
-func (zc *ZoneController) UpdateSchedulerElem(elem *SchedulerElem) {
-	zc.schedulersLock.Lock()
-	defer zc.schedulersLock.Unlock()
-
-	for _, scheduler := range zc.schedulers {
-		if scheduler.SignalUri == elem.SignalUri && scheduler.SlotUri == elem.SlotUri {
-			scheduler.Priority = elem.Priority
-			return
-		}
-	}
+	schedulerId := generateBWElemUUID(elem)
+	zc.schedulers.Delete(schedulerId)
 }
 
 // SetTstat sets and subsribes to a new thermostat as the thermostat of the ZoneController.
 // The new thermostat has the given signalUri and slotUri.
 // SetTstat is a wrapper around SetTstatElem.
-func (zc *ZoneController) SetTstat(signalUri string, slotUri string) {
+func (zc *ZoneController) AddOrUpdateTstat(signalUri string, slotUri string) {
 	elem := NewTstatElem(signalUri, slotUri)
-	zc.SetTstatElem(elem)
+	zc.AddOrUpdateTstatElem(elem)
 }
 
 // SetTstat sets and subsribes to a new thermostat as the thermostat of the ZoneController.
-func (zc *ZoneController) SetTstatElem(elem *TstatElem) {
-	zc.tstat = elem
-	zc.SubscribeToTstat()
+func (zc *ZoneController) AddOrUpdateTstatElem(elem *TstatElem) {
+	tstatId := generateBWElemUUID(elem)
+	oldTstatInterface, ok := zc.tstats.Load(tstatId)
+	if ok {
+		oldTstat, ok := oldTstatInterface.(*TstatElem)
+		if !ok {
+			fmt.Println("Cast failed")
+			return
+		}
+		zc.bwClient.Unsubscribe(oldTstat.SubscribeHandle)
+	}
+	zc.tstats.Store(tstatId, elem)
+	zc.subscribeToTstat(elem)
 }
 
 // RemoveTstat removes and unsubscribes from the thermostat of the ZoneController.
 // This will leave the ZoneController without a thermostat.
-func (zc *ZoneController) RemoveTstat() {
-	zc.bwClient.Unsubscribe(zc.tstat.SubscribeHandle)
-	zc.tstat = nil
+func (zc *ZoneController) RemoveTstat(signalUri string, slotUri string) {
+	elem := NewTstatElem(signalUri, slotUri)
+	zc.RemoveTstatElem(elem)
+}
+
+func (zc *ZoneController) RemoveTstatElem(tstat *TstatElem) {
+	tstatId := generateBWElemUUID(tstat)
+	zc.bwClient.Unsubscribe(tstat.SubscribeHandle)
+	zc.tstats.Delete(tstatId)
 }
 
 // Run initiates operation of the ZoneController. It will subscribe to all schedulers and the thermostat
 // and mediate communication between the them.
 func (zc *ZoneController) Run() {
 	zc.SubscribeToAllSchedulers()
-	zc.SubscribeToTstat()
-	zc.PublishToSchedulers()
-	zc.PublishToThermostat()
+	zc.SubscribeToAllTstats()
+	zc.PublishToAllSchedulers()
+	zc.PublishToAllThermostats()
 	running := make(chan bool)
 	<- running
 }
 
 // SubscribeToAllSchedulers subscribes the ZoneController to all schedulers.
 func (zc *ZoneController) SubscribeToAllSchedulers() {
-	zc.schedulersLock.Lock()
-	defer zc.schedulersLock.Unlock()
-
-	for _, scheduler := range zc.schedulers {
-		zc.SubscribeToScheduler(scheduler)
-	}
+	zc.schedulers.Range(func(key, value interface{}) bool {
+		err := zc.subscribeToScheduler(value.(*SchedulerElem))
+		if err != nil {
+			fmt.Println(err)
+		}
+		return true
+	})
 }
 
 // SubscribeToScheduler subscribes the ZoneController to the given scheduler.
-func (zc *ZoneController) SubscribeToScheduler(scheduler *SchedulerElem) error {
+func (zc *ZoneController) subscribeToScheduler(scheduler *SchedulerElem) error {
 	signalParams := &bw2.SubscribeParams {
 		URI: scheduler.SignalUri,
 	}
@@ -267,10 +307,14 @@ func (zc *ZoneController) isValidSchedule(scheduler *SchedulerElem, schedule map
 	return zc.maxPriority == scheduler.Priority && !reflect.DeepEqual(scheduler.LastReceivedSchedule, schedule)
 }
 
-func (zc *ZoneController) SubscribeToTstat() {
-	zc.subscribeToTstat(zc.tstat)
+func (zc *ZoneController) SubscribeToAllTstats() {
+	zc.tstats.Range(func(key, value interface{}) bool {
+		zc.subscribeToTstat(value.(*TstatElem))
+		return true
+	})
 }
 
+//TODO: Fix
 func (zc *ZoneController) subscribeToTstat(tstat *TstatElem) {
 	signalParams := &bw2.SubscribeParams {
 		URI: tstat.SignalUri,
@@ -282,7 +326,7 @@ func (zc *ZoneController) subscribeToTstat(tstat *TstatElem) {
 	}
 
 	tstat.SubscribeHandle = handle
-	fmt.Println("Subscribing to tstat", zc.tstat.SignalUri)
+	fmt.Println("Subscribing to tstat", tstat.SignalUri)
 	
 	go func() {
 		for msg := range subscribeTstatChan {
@@ -308,68 +352,70 @@ func (zc *ZoneController) subscribeToTstat(tstat *TstatElem) {
 
 			tstat.LastSentScheduleLock.Lock()
 			if (tstatData["time"].(uint64) + DELAY < uint64(time.Now().UnixNano())) || (tstatData["override"] == true ||
-				(tstatData["heating_setpoint"] == zc.tstat.LastSentSchedule["heating_setpoint"] &&
-				tstatData["cooling_setpoint"] == zc.tstat.LastSentSchedule["cooling_setpoint"] &&
-				tstatData["mode"] == zc.tstat.LastSentSchedule["mode"])) {
+				(tstatData["heating_setpoint"] == tstat.LastSentSchedule["heating_setpoint"] &&
+				tstatData["cooling_setpoint"] == tstat.LastSentSchedule["cooling_setpoint"] &&
+				tstatData["mode"] == tstat.LastSentSchedule["mode"])) {
 				//last sent schedule was delivered.
 				fmt.Println(tstatData)
 				zc.tstatDataChan <- tstatData
 			} else {
 				fmt.Println("msg not delivered")
-				zc.scheduleChan <- zc.tstat.LastSentSchedule
+				zc.scheduleChan <- tstat.LastSentSchedule
 			}
 			tstat.LastSentScheduleLock.Unlock()
 		}
 	}()
 }
 
-func (zc *ZoneController) PublishToThermostat() {
-	go func() {
-		for schedule := range zc.scheduleChan {
-			zc.tstat.LastSentScheduleLock.Lock()
-			if zc.tstat.LastSentSchedule != nil && schedule["time"].(uint64) < zc.tstat.LastSentSchedule["time"].(uint64) {
-				zc.tstat.LastSentScheduleLock.Unlock()
-				continue
-			}
-			zc.tstat.LastSentScheduleLock.Unlock()
+//TODO: Fix
+func (zc *ZoneController) PublishToAllThermostats() {
+	// go func() {
+	// 	for schedule := range zc.scheduleChan {
+	// 		zc.tstat.LastSentScheduleLock.Lock()
+	// 		if zc.tstat.LastSentSchedule != nil && schedule["time"].(uint64) < zc.tstat.LastSentSchedule["time"].(uint64) {
+	// 			zc.tstat.LastSentScheduleLock.Unlock()
+	// 			continue
+	// 		}
+	// 		zc.tstat.LastSentScheduleLock.Unlock()
 
-			schedulePO, err := NewPO(schedule, PONUM)
-			if err != nil {
-				fmt.Println(err)
-				continue
-			}
+	// 		schedulePO, err := NewPO(schedule, PONUM)
+	// 		if err != nil {
+	// 			fmt.Println(err)
+	// 			continue
+	// 		}
 
-			zc.schedulersLock.Lock()
-			zc.publishPO(zc.tstat.SlotUri, schedulePO)
-			fmt.Println("Published schedule", schedule, zc.tstat.SlotUri)
+	// 		zc.schedulersLock.Lock()
+	// 		zc.publishPO(zc.tstat.SlotUri, schedulePO)
+	// 		fmt.Println("Published schedule", schedule, zc.tstat.SlotUri)
 
-			zc.tstat.LastSentScheduleLock.Lock()
-			zc.tstat.LastSentSchedule = schedule
-			zc.tstat.LastSentScheduleLock.Unlock()
+	// 		zc.tstat.LastSentScheduleLock.Lock()
+	// 		zc.tstat.LastSentSchedule = schedule
+	// 		zc.tstat.LastSentScheduleLock.Unlock()
 
-			zc.schedulersLock.Unlock()
-		}
-	}()
+	// 		zc.schedulersLock.Unlock()
+	// 	}
+	// }()
 }
 
-func (zc *ZoneController) PublishToSchedulers() {
-	go func() {
-		for tstatData := range zc.tstatDataChan {
-			fmt.Println("Publishing tstat data")
-			tstatDataPO, err := NewPO(tstatData, PONUM)
-			if err != nil {
-				fmt.Println(err)
-				continue
-			}
+//TODO: Fix
+func (zc *ZoneController) PublishToAllSchedulers() {
+	// go func() {
+	// 	for tstatData := range zc.tstatDataChan {
+	// 		fmt.Println("Publishing tstat data")
+	// 		tstatDataPO, err := NewPO(tstatData, PONUM)
+	// 		if err != nil {
+	// 			fmt.Println(err)
+	// 			continue
+	// 		}
 
-			zc.schedulersLock.Lock()
-			for _, scheduler := range zc.schedulers {
-				zc.publishPO(scheduler.SlotUri, tstatDataPO)
-				fmt.Println("Published thermostat data", tstatData, scheduler.SlotUri)
-			}
-			zc.schedulersLock.Unlock()
-		}
-	}()
+	// 		zc.schedulersLock.Lock()
+	// 		for _, scheduler := range zc.schedulers {
+	// 			zc.publishPO(scheduler.SlotUri, tstatDataPO)
+	// 			fmt.Println("Published thermostat data", tstatData, scheduler.SlotUri)
+	// 		}
+	// 		zc.schedulersLock.Unlock()
+	// 	}
+	// }()
 }
 
 func (zc *ZoneController) publishPO(uri string, po bw2.PayloadObject) {

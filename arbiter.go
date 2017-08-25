@@ -105,7 +105,8 @@ func main() {
 	tstat := NewTstatElem("scratch.ns/services/s.vthermostat/vthermostat/i.xbos.thermostat/signal/info",
 		"scratch.ns/services/s.vthermostat/vthermostat/i.xbos.thermostat/slot/state")
 
-	zc := NewZoneController(bwClient, iface, schedulers, tstat, nil)
+	tstats := []*TstatElem{tstat}
+	zc := NewZoneController(bwClient, iface, schedulers, tstats, nil)
 	
 	a := NewArbiter(bwClient, baseuri)
 	a.AddZoneController(zc)
