@@ -25,14 +25,14 @@ func NewPO(msg map[string]interface{}, ponum string) (bw2.PayloadObject, error) 
 }
 
 type BWElem interface {
+	GetId() uuid.UUID
 	GetSignalUri() string
-	SetSignalUri(signalUri string)
 	GetSlotUri() string
-	SetSlotUri(slotUri string)
 }
 
 // SchedulerElem contains the necessary information to publish and subscribe to a scheduler.
 type SchedulerElem struct {
+	Id uuid.UUID
 	SignalUri string
 	SlotUri string
 	Priority int
@@ -40,24 +40,21 @@ type SchedulerElem struct {
 	LastReceivedSchedule map[string]interface{}
 }
 
-func (scheduler *SchedulerElem) GetSignalUri() string {
-	return scheduler.SignalUri
+func (scheduler *SchedulerElem) GetId() uuid.UUID {
+	return scheduler.Id
 }
 
-func (scheduler *SchedulerElem) SetSignalUri(signalUri string) {
-	scheduler.SignalUri = signalUri
+func (scheduler *SchedulerElem) GetSignalUri() string {
+	return scheduler.SignalUri
 }
 
 func (scheduler *SchedulerElem) GetSlotUri() string {
 	return scheduler.SlotUri
 }
 
-func (scheduler *SchedulerElem) SetSlotUri(slotUri string) {
-	scheduler.SlotUri = slotUri
-}
-
 // TstatElem contains the necessary information to publish and subscribe to a thermostat.
 type TstatElem struct {
+	Id uuid.UUID
 	SignalUri string
 	SlotUri string
 	SubscribeHandle string
@@ -65,25 +62,22 @@ type TstatElem struct {
 	LastSentScheduleLock *sync.Mutex
 }
 
-func (tstat *TstatElem) GetSignalUri() string {
-	return tstat.SignalUri
+func (tstat *TstatElem) GetId() uuid.UUID {
+	return tstat.Id
 }
 
-func (tstat *TstatElem) SetSignalUri(signalUri string) {
-	tstat.SignalUri = signalUri
+func (tstat *TstatElem) GetSignalUri() string {
+	return tstat.SignalUri
 }
 
 func (tstat *TstatElem) GetSlotUri() string {
 	return tstat.SlotUri
 }
 
-func (tstat *TstatElem) SetSlotUri(slotUri string) {
-	tstat.SlotUri = slotUri
-}
-
 // NewSchedulerElem creates a new SchedulerElem with the given signalUri, slotUri, and priority.
 func NewSchedulerElem(signalUri string, slotUri string, priority int) *SchedulerElem {
 	return &SchedulerElem {
+		Id: generateBWElemUUID(signalUri, slotUri),
 		SignalUri: signalUri,
 		SlotUri: slotUri,
 		Priority: priority,
@@ -95,6 +89,7 @@ func NewSchedulerElem(signalUri string, slotUri string, priority int) *Scheduler
 // NewTstatElem creates a new TstatElem with the given signalUri and slotUri.
 func NewTstatElem(signalUri string, slotUri string) *TstatElem {
 	return &TstatElem {
+		Id: generateBWElemUUID(signalUri, slotUri),
 		SignalUri: signalUri,
 		SlotUri: slotUri,
 		SubscribeHandle: "",
@@ -178,8 +173,17 @@ func (zc *ZoneController) AddOrUpdateScheduler(signalUri string, slotUri string,
 // AddSchedulerElem adds the SchedulerElem to the ZoneController, sorted by priority.
 // If a scheduler exists with the given signalUri and slotUri, it will be replaced.
 func (zc *ZoneController) AddOrUpdateSchedulerElem(elem *SchedulerElem) {
-	schedulerId := generateBWElemUUID(elem)
-	zc.schedulers.Store(schedulerId, elem)
+	oldSchedulerInterface, ok := zc.schedulers.Load(elem.Id)
+	if ok {
+		oldScheduler, ok := oldSchedulerInterface.(*SchedulerElem)
+		if !ok {
+			fmt.Println("Cast failed")
+			return
+		}
+		zc.bwClient.Unsubscribe(oldScheduler.SubscribeHandle)
+	}
+	zc.schedulers.Store(elem.Id, elem)
+	zc.subscribeToScheduler(elem)
 }
 
 // RemoveScheduler removes a SchedulerElem from the ZoneController that matches the given signalUri and slotUri.
@@ -192,8 +196,7 @@ func (zc *ZoneController) RemoveScheduler(signalUri string, slotUri string) {
 // RemoveSchedulerElem removes a SchedulerElem from the ZoneController
 // that matches the given elem's signalUri and slotUri.
 func (zc *ZoneController) RemoveSchedulerElem(elem *SchedulerElem) {
-	schedulerId := generateBWElemUUID(elem)
-	zc.schedulers.Delete(schedulerId)
+	zc.schedulers.Delete(elem.Id)
 }
 
 // SetTstat sets and subsribes to a new thermostat as the thermostat of the ZoneController.
@@ -206,8 +209,7 @@ func (zc *ZoneController) AddOrUpdateTstat(signalUri string, slotUri string) {
 
 // SetTstat sets and subsribes to a new thermostat as the thermostat of the ZoneController.
 func (zc *ZoneController) AddOrUpdateTstatElem(elem *TstatElem) {
-	tstatId := generateBWElemUUID(elem)
-	oldTstatInterface, ok := zc.tstats.Load(tstatId)
+	oldTstatInterface, ok := zc.tstats.Load(elem.Id)
 	if ok {
 		oldTstat, ok := oldTstatInterface.(*TstatElem)
 		if !ok {
@@ -216,7 +218,7 @@ func (zc *ZoneController) AddOrUpdateTstatElem(elem *TstatElem) {
 		}
 		zc.bwClient.Unsubscribe(oldTstat.SubscribeHandle)
 	}
-	zc.tstats.Store(tstatId, elem)
+	zc.tstats.Store(elem.Id, elem)
 	zc.subscribeToTstat(elem)
 }
 
@@ -227,10 +229,9 @@ func (zc *ZoneController) RemoveTstat(signalUri string, slotUri string) {
 	zc.RemoveTstatElem(elem)
 }
 
-func (zc *ZoneController) RemoveTstatElem(tstat *TstatElem) {
-	tstatId := generateBWElemUUID(tstat)
-	zc.bwClient.Unsubscribe(tstat.SubscribeHandle)
-	zc.tstats.Delete(tstatId)
+func (zc *ZoneController) RemoveTstatElem(elem *TstatElem) {
+	zc.bwClient.Unsubscribe(elem.SubscribeHandle)
+	zc.tstats.Delete(elem.Id)
 }
 
 // Run initiates operation of the ZoneController. It will subscribe to all schedulers and the thermostat
@@ -268,6 +269,7 @@ func (zc *ZoneController) subscribeToScheduler(scheduler *SchedulerElem) error {
 
 	scheduler.SubscribeHandle = handle
 
+	// Everytime a schedule is received, must determine if master schedule needs to be updated.
 	go func() {
 		fmt.Println("Beginning subscribe to scheduler")
 		for msg := range subscribeScheduleChan {
@@ -303,6 +305,7 @@ func (zc *ZoneController) subscribeToScheduler(scheduler *SchedulerElem) error {
 }
 
 // Logic that determines if a schedule is valid goes in here. (e.g. Max/min cooling setpoint, max/min heating setpoint, )
+//TODO: move to schedule determination
 func (zc *ZoneController) isValidSchedule(scheduler *SchedulerElem, schedule map[string]interface{}) bool {
 	return zc.maxPriority == scheduler.Priority && !reflect.DeepEqual(scheduler.LastReceivedSchedule, schedule)
 }
@@ -368,39 +371,43 @@ func (zc *ZoneController) subscribeToTstat(tstat *TstatElem) {
 }
 
 //TODO: Fix
+// Assumes all schedules in zc.scheduleChan are valid and don't need checking
 func (zc *ZoneController) PublishToAllThermostats() {
-	// go func() {
-	// 	for schedule := range zc.scheduleChan {
-	// 		zc.tstat.LastSentScheduleLock.Lock()
-	// 		if zc.tstat.LastSentSchedule != nil && schedule["time"].(uint64) < zc.tstat.LastSentSchedule["time"].(uint64) {
-	// 			zc.tstat.LastSentScheduleLock.Unlock()
-	// 			continue
-	// 		}
-	// 		zc.tstat.LastSentScheduleLock.Unlock()
+	go func() {
+		for schedule := range zc.scheduleChan {
+			zc.tstats.Range(func(key, value interface{}) bool {
+				tstat := value.(*TstatElem)
 
-	// 		schedulePO, err := NewPO(schedule, PONUM)
-	// 		if err != nil {
-	// 			fmt.Println(err)
-	// 			continue
-	// 		}
+				schedulePO, err := NewPO(schedule, PONUM)
+				if err != nil {
+					fmt.Println(err)
+					continue
+				}
 
-	// 		zc.schedulersLock.Lock()
-	// 		zc.publishPO(zc.tstat.SlotUri, schedulePO)
-	// 		fmt.Println("Published schedule", schedule, zc.tstat.SlotUri)
-
-	// 		zc.tstat.LastSentScheduleLock.Lock()
-	// 		zc.tstat.LastSentSchedule = schedule
-	// 		zc.tstat.LastSentScheduleLock.Unlock()
-
-	// 		zc.schedulersLock.Unlock()
-	// 	}
-	// }()
+				zc.publishPO(tstat.SlotUri, schedulePO)
+				tstat.LastSentSchedule = schedule
+				return true
+			})
+		}
+	}()
 }
 
 //TODO: Fix
 func (zc *ZoneController) PublishToAllSchedulers() {
-	// go func() {
-	// 	for tstatData := range zc.tstatDataChan {
+	go func() {
+		for tstatData := range zc.tstatDataChan {
+			zc.schedulers.Range(func(key, value interface{}) bool {
+				scheduler := value.(*SchedulerElem)
+
+				schedulePO, err := NewPO(tstatData, PONUM)
+				if err != nil {
+					fmt.Println(err)
+					continue
+				}
+
+				zc.publishPO(scheduler.SlotUri, schedulePO)
+				return true
+			})
 	// 		fmt.Println("Publishing tstat data")
 	// 		tstatDataPO, err := NewPO(tstatData, PONUM)
 	// 		if err != nil {
@@ -414,8 +421,8 @@ func (zc *ZoneController) PublishToAllSchedulers() {
 	// 			fmt.Println("Published thermostat data", tstatData, scheduler.SlotUri)
 	// 		}
 	// 		zc.schedulersLock.Unlock()
-	// 	}
-	// }()
+		}
+	}()
 }
 
 func (zc *ZoneController) publishPO(uri string, po bw2.PayloadObject) {
