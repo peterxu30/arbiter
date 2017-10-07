@@ -24,12 +24,6 @@ func NewPO(msg map[string]interface{}, ponum string) (bw2.PayloadObject, error) 
 	return po, nil
 }
 
-type BWElem interface {
-	GetId() uuid.UUID
-	GetSignalUri() string
-	GetSlotUri() string
-}
-
 // SchedulerElem contains the necessary information to publish and subscribe to a scheduler.
 type SchedulerElem struct {
 	Id uuid.UUID
@@ -38,18 +32,6 @@ type SchedulerElem struct {
 	Priority int
 	SubscribeHandle string
 	LastReceivedSchedule map[string]interface{}
-}
-
-func (scheduler *SchedulerElem) GetId() uuid.UUID {
-	return scheduler.Id
-}
-
-func (scheduler *SchedulerElem) GetSignalUri() string {
-	return scheduler.SignalUri
-}
-
-func (scheduler *SchedulerElem) GetSlotUri() string {
-	return scheduler.SlotUri
 }
 
 // TstatElem contains the necessary information to publish and subscribe to a thermostat.
@@ -62,22 +44,10 @@ type TstatElem struct {
 	LastSentScheduleLock *sync.Mutex
 }
 
-func (tstat *TstatElem) GetId() uuid.UUID {
-	return tstat.Id
-}
-
-func (tstat *TstatElem) GetSignalUri() string {
-	return tstat.SignalUri
-}
-
-func (tstat *TstatElem) GetSlotUri() string {
-	return tstat.SlotUri
-}
-
 // NewSchedulerElem creates a new SchedulerElem with the given signalUri, slotUri, and priority.
 func NewSchedulerElem(signalUri string, slotUri string, priority int) *SchedulerElem {
 	return &SchedulerElem {
-		Id: generateBWElemUUID(signalUri, slotUri),
+		Id: generateUUID(signalUri, slotUri),
 		SignalUri: signalUri,
 		SlotUri: slotUri,
 		Priority: priority,
@@ -89,7 +59,7 @@ func NewSchedulerElem(signalUri string, slotUri string, priority int) *Scheduler
 // NewTstatElem creates a new TstatElem with the given signalUri and slotUri.
 func NewTstatElem(signalUri string, slotUri string) *TstatElem {
 	return &TstatElem {
-		Id: generateBWElemUUID(signalUri, slotUri),
+		Id: generateUUID(signalUri, slotUri),
 		SignalUri: signalUri,
 		SlotUri: slotUri,
 		SubscribeHandle: "",
@@ -103,9 +73,9 @@ type ZoneController struct {
 	id uuid.UUID
 	bwClient *bw2.BW2Client
 	iface *bw2.Interface
-	maxPriority int
-	schedulers sync.Map
-	tstats sync.Map
+	scheduleFormulator *ScheduleFormulator
+	schedulers sync.Map // map of schedulerElem id -> schedulerElem
+	tstats sync.Map // map of tstatElem id -> tstatElem
 	scheduleChan chan map[string]interface{}
 	tstatDataChan chan map[string]interface{}
 	containingZC *ZoneController
@@ -127,30 +97,23 @@ func NewZoneController(bwClient *bw2.BW2Client,
 	var tstatMap sync.Map
 
 	for _, scheduler := range schedulers {
-		schedulerId := generateBWElemUUID(scheduler)
-		schedulerMap.Store(schedulerId, scheduler)
+		schedulerMap.Store(scheduler.Id, scheduler)
 	}
 
 	for _, tstat := range tstats {
-		tstatId := generateBWElemUUID(tstat)
-		tstatMap.Store(tstatId, tstat)
+		tstatMap.Store(tstat.Id, tstat)
 	}
 	
 	return &ZoneController {
 		id: generateRandomUUID(),
 		bwClient: bwClient,
 		iface: iface,
-		maxPriority: maxPriority,
 		schedulers: schedulerMap,
 		tstats: tstatMap,
 		scheduleChan: make(chan map[string]interface{}, 5),
 		tstatDataChan: make(chan map[string]interface{}, 5),
 		containingZC: containingZC,
 	}
-}
-
-func generateBWElemUUID(elem BWElem) uuid.UUID {
-	return generateUUID(elem.GetSignalUri(), elem.GetSlotUri())
 }
 
 func generateUUID(ns string, name string) uuid.UUID {
@@ -306,9 +269,9 @@ func (zc *ZoneController) subscribeToScheduler(scheduler *SchedulerElem) error {
 
 // Logic that determines if a schedule is valid goes in here. (e.g. Max/min cooling setpoint, max/min heating setpoint, )
 //TODO: move to schedule determination
-func (zc *ZoneController) isValidSchedule(scheduler *SchedulerElem, schedule map[string]interface{}) bool {
-	return zc.maxPriority == scheduler.Priority && !reflect.DeepEqual(scheduler.LastReceivedSchedule, schedule)
-}
+// func (zc *ZoneController) isValidSchedule(scheduler *SchedulerElem, schedule map[string]interface{}) bool {
+// 	return zc.maxPriority == scheduler.Priority && !reflect.DeepEqual(scheduler.LastReceivedSchedule, schedule)
+// }
 
 func (zc *ZoneController) SubscribeToAllTstats() {
 	zc.tstats.Range(func(key, value interface{}) bool {
@@ -381,7 +344,7 @@ func (zc *ZoneController) PublishToAllThermostats() {
 				schedulePO, err := NewPO(schedule, PONUM)
 				if err != nil {
 					fmt.Println(err)
-					continue
+					return true
 				}
 
 				zc.publishPO(tstat.SlotUri, schedulePO)
@@ -402,25 +365,12 @@ func (zc *ZoneController) PublishToAllSchedulers() {
 				schedulePO, err := NewPO(tstatData, PONUM)
 				if err != nil {
 					fmt.Println(err)
-					continue
+					return true
 				}
 
 				zc.publishPO(scheduler.SlotUri, schedulePO)
 				return true
 			})
-	// 		fmt.Println("Publishing tstat data")
-	// 		tstatDataPO, err := NewPO(tstatData, PONUM)
-	// 		if err != nil {
-	// 			fmt.Println(err)
-	// 			continue
-	// 		}
-
-	// 		zc.schedulersLock.Lock()
-	// 		for _, scheduler := range zc.schedulers {
-	// 			zc.publishPO(scheduler.SlotUri, tstatDataPO)
-	// 			fmt.Println("Published thermostat data", tstatData, scheduler.SlotUri)
-	// 		}
-	// 		zc.schedulersLock.Unlock()
 		}
 	}()
 }
