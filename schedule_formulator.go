@@ -16,7 +16,7 @@ type ScheduleMetadata struct {
 func NewScheduleMetadata(schedulerId uuid.UUID, priority int) *ScheduleMetadata {
     return &ScheduleMetadata {
         schedulerId: schedulerId,
-        priority: int
+        priority: priority,
     }
 }
 
@@ -27,10 +27,10 @@ type ScheduleData struct {
 }
 
 func NewScheduleData(schedulerId uuid.UUID, priority int, schedule map[string]interface{}) *ScheduleData {
-    scheduleMetadata := NewScheduleMetadata(priority, schedulerId)
+    scheduleMetadata := NewScheduleMetadata(schedulerId, priority)
     return &ScheduleData {
         schedule: schedule,
-        metadata: scheduleMetadata
+        metadata: scheduleMetadata,
     }
 }
 
@@ -53,4 +53,23 @@ func NewScheduleFormulator() *ScheduleFormulator {
 func (formulator *ScheduleFormulator) AddSchedule(schedulerId uuid.UUID, priority int, schedule map[string]interface{}) {
     scheduleData := NewScheduleData(schedulerId, priority, schedule)
     formulator.scheduleMap.Store(schedulerId, scheduleData)
+}
+
+func (formulator *ScheduleFormulator) RemoveScheduler(schedulerId) {
+    formulator.scheduleMap.Delete(schedulerId)
+}
+
+// TODO: implementation is filler. only returns schedule of highest priority
+func (formulator *ScheduleFormulator) GenerateMasterSchedule() map[string]interface{} {
+    maxPriority := 0
+    var maxSchedule map[string]interface{} = nil
+    formulator.scheduleMap.Range(func(key, value interface{}) bool {
+        scheduleData := value.(*ScheduleData)
+        if scheduleData.metadata.priority > maxPriority {
+            maxPriority = scheduleData.metadata.priority
+            maxSchedule = scheduleData.schedule
+        }
+        return true
+    })
+    return maxSchedule
 }
